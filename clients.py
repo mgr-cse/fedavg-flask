@@ -84,13 +84,16 @@ class user(object):
 
 
 class clients(object):
-    def __init__(self, numOfClients, dataSetName, bLocalBatchSize,
+    def __init__(self, client_id, user, bLocalBatchSize,
                  eLocalEpoch, sess, train, inputsx, inputsy, is_IID):
+        '''
         self.num_of_clients = numOfClients
         self.dataset_name = dataSetName
         self.dataset_size = None
         self.test_data = None
         self.test_label = None
+        '''
+        self.client_id = client_id
         self.B = bLocalBatchSize
         self.E = eLocalEpoch
         self.session = sess
@@ -110,7 +113,8 @@ class clients(object):
         self.lat_factor = 10
         self.noise_fact = 0.1
 
-        self.dataset_balance_allocation()
+        #self.dataset_balance_allocation()
+        self.clientsSet[self.client_id] = user
 
 
     def dataset_balance_allocation(self):

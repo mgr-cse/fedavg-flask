@@ -12,11 +12,15 @@ from pyJoules.energy_meter import measure_energy
 from pyJoules.energy_meter import EnergyContext
 from pyJoules.device.rapl_device import RaplCoreDomain
 from pyJoules.handler.csv_handler import CSVHandler
+import requests
+import pickle
+from traceback import print_exc
+import codecs
 
 parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter, description="FedAvg")
 parser.add_argument('-g', '--gpu', type=str, default='0,1,2,3,4,5,6,7', help='gpu id to use(e.g. 0,1,2,3)')
-parser.add_argument('-nc', '--num_of_clients', type=int, default=200, help='numer of the clients')
-parser.add_argument('-cf', '--cfraction', type=float, default=0.1, help='C fraction, 0 means 1 client, 1 means total clients')
+parser.add_argument('-nc', '--num_of_clients', type=int, default=4, help='numer of the clients')
+parser.add_argument('-cf', '--cfraction', type=float, default=1.0, help='C fraction, 0 means 1 client, 1 means total clients')
 parser.add_argument('-E', '--epoch', type=int, default=5, help='local train epoch')
 parser.add_argument('-B', '--batchsize', type=int, default=200, help='local train batch size')
 parser.add_argument('-mn', '--modelname', type=str, default='mnist_2nn', help='the model to train')
@@ -33,6 +37,18 @@ parser.add_argument('-mig', '--migration', type=int, default=1, help='enable mig
 def test_mkdir(path):
     if not os.path.isdir(path):
         os.mkdir(path)
+
+def train_client(address: str, params):
+    dump_vars = codecs.encode(pickle.dumps(params), "base64").decode()
+    try:
+        res = requests.post(f'http://{address}/train', json={"params": dump_vars})
+        response = res.json()
+        local_vars = response['params']
+        local_vars = pickle.loads(codecs.decode(local_vars.encode(), "base64"))
+        return local_vars
+    except:
+        print_exc()
+        return None
 
 
 if __name__=='__main__':
@@ -85,24 +101,25 @@ if __name__=='__main__':
             gpu_options=tf.GPUOptions(allow_growth=True))) as sess:
         sess.run(tf.initialize_all_variables())
 
-        myClients = clients(args.num_of_clients, datasetname,
-                            args.batchsize, args.epoch, sess, train, inputsx, inputsy, is_IID=args.IID)
+        with open('client-datasets/test.data', 'rb') as f:
+            test_data = pickle.load(f)
+            print('+++ test data loaded successfully')
+        
+        with open('client-datasets/test.label', 'rb') as f:
+            test_label = pickle.load(f)
+            print('+++ test label loaded successfully')
+
+
+        # have client configs here
+        myClients = {}
+        for i in range(args.num_of_clients):
+            myClients[f'client{i}'] = f'127.0.0.1:400{i}'
         
         #@measure_energy(domains=[RaplCoreDomain(0)], handler=energy_csv)
-        def client_local_update(*args):
-            return myClients.ClientUpdate(*args)
-        
-        
-        # params for cloud only topology
-        global_energy = 0.0
-        global_energy_rate = 1000.0
-        myClients.base_lat = 500
-        myClients.lat_factor = 10
         
         vars = tf.trainable_variables()
         global_vars = sess.run(vars)
         num_in_comm = int(max(args.num_of_clients * args.cfraction, 1))
-        max_comm_lat = 0.0
         for i in tqdm(range(args.num_comm)):
             #print("communicate round {}".format(i))
             order = np.arange(args.num_of_clients)
@@ -110,40 +127,27 @@ if __name__=='__main__':
             clients_in_comm = ['client{}'.format(i) for i in order[0:num_in_comm]]
 
             sum_vars = None
-            max_lat = 0.0
             for client in clients_in_comm:
-                # add latency call
-                curr_lat = myClients.getlat(client, len(clients_in_comm), args.migration)
-                max_lat += curr_lat
-                local_vars = client_local_update(client, global_vars)
-                #with EnergyContext(handler=energy_csv, domains=[RaplCoreDomain(0)]) as ctx:    
+                local_vars = train_client(myClients[client], global_vars)
                 if sum_vars is None:
                     sum_vars = local_vars
                 else:
                     for sum_var, local_var in zip(sum_vars, local_vars):
                        sum_var += local_var
-            max_lat = max_lat / len(clients_in_comm)
-            max_comm_lat = max([max_comm_lat, max_lat])
-
             global_vars = []
             for var in sum_vars:
                 global_vars.append(var / num_in_comm)
-            global_energy += global_energy_rate + random.uniform(0, global_energy_rate/2)
 
             if i % args.val_freq == 0:
                 for variable, value in zip(vars, global_vars):
                     variable.load(value, sess)
-                test_data = myClients.test_data
-                test_label = myClients.test_label
                 acc, cross, y_pred_run, y_true_run = sess.run([accuracy, Cross_entropy, y_pred, y_true], feed_dict={inputsx: test_data, inputsy: test_label})
                 
                 # data to note
                 print('communication round:', i)
                 print('Accuracy:', acc, 'Loss:', cross)
-                print('Energy consumed:', global_energy + myClients.energy)
-                print('Latency:', max_lat)
-                mig_cost = myClients.getmodcost()
-                print('Migration cost:', mig_cost)
+                
+                print('Migration cost:', 0)
                 f1_val = f1_score(y_true_run, y_pred_run, average='macro')
                 prec_val = precision_score(y_true_run, y_pred_run, average='macro')
                 rec_val = recall_score(y_true_run, y_pred_run, average='macro')
@@ -154,20 +158,15 @@ if __name__=='__main__':
                     "round": i,
                     "accuracy": float(acc),
                     "loss": [float(l) for l in cross],
-                    "energy_global": global_energy,
-                    "energy_client": myClients.energy,
-                    "latency": max_lat,
+                    "energy_global": 0,
+                    "energy_client": 0,
+                    "latency": 0,
                     "f1": f1_val,
                     "prec": prec_val,
                     "rec": rec_val,
-                    "mig_cost": mig_cost
+                    "mig_cost": 0
                 }
                 data_to_save.append(data_note)
-
-            if i % args.save_freq == 0:
-                checkpoint_name = os.path.join(args.save_path, '{}_comm'.format(args.modelname) +
-                                               'IID{}_communication{}'.format(args.IID, i+1)+ '.ckpt')
-                save_path = saver.save(sess, checkpoint_name)
 
         # save obeserved_data
         final_data = {

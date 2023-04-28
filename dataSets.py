@@ -197,6 +197,3 @@ def extract_labels(filename):
         buf = bytestream.read(num_items)
         labels = np.frombuffer(buf, dtype=np.uint8)
         return dense_to_one_hot(labels)
-    
-if __name__ == '__main__':
-     app.run(host='0.0.0.0', port=4000, debug=False, threaded=False, processes=1)

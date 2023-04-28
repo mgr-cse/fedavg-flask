@@ -1,1 +1,2 @@
-client-datasets
+client-datasets/
+__pycache__/
