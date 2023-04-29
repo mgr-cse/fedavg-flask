@@ -72,6 +72,7 @@ async def train_clients(clients_in_comm, global_vars):
     for client in clients_in_comm:
         local_var_futures.append(loop.run_in_executor(None, train_client ,myClients[client], global_vars))
 
+    print('train clients', len(local_var_futures))
     for f in local_var_futures:
         local_vars = await f    
         if sum_vars is None:
@@ -171,17 +172,22 @@ def train_func():
 
         # call clients in parallel async
         loop = asyncio.get_event_loop()
-        global_vars = loop.run_until_complete(train_clients(clients_in_comm, global_vars))
+        global_vars_updated = loop.run_until_complete(train_clients(clients_in_comm, global_vars))
+        print('+++++ og vars')
+        print(global_vars[0])
+        print('+++++ uodated vars')
+        print(global_vars_updated[0])
+        global_vars = deepcopy(global_vars_updated)
 
         if i % args.val_freq == 0 and i != 0:
             # mixing
-            for variable, value in zip(tf.trainable_variables(), global_vars):
+            for variable, value in zip(tf.trainable_variables(), global_vars_updated):
                 variable.load(value, sess)
             acc, cross, y_pred_run, y_true_run = sess.run([accuracy, Cross_entropy, y_pred, y_true], feed_dict={inputsx: test_data, inputsy: test_label})
             my_score = f1_score(y_true_run, y_pred_run, average=None)
             print('accuracy:', acc)
             
-            
+            '''
             lats = []
             for fog in myFogdevs:
                 lat = get_latency(myFogdevs[fog])
@@ -214,7 +220,7 @@ def train_func():
 
             # update the self model
             global_vars = deepcopy(global_vars_new)      
-            
+            '''
 
     params = codecs.encode(pickle.dumps(global_vars), "base64").decode()
     return {
