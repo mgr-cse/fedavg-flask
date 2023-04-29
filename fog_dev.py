@@ -19,7 +19,7 @@ import codecs
 
 parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter, description="FedAvg")
 parser.add_argument('-g', '--gpu', type=str, default='0,1,2,3,4,5,6,7', help='gpu id to use(e.g. 0,1,2,3)')
-parser.add_argument('-nc', '--num_of_clients', type=int, default=8, help='numer of the clients')
+parser.add_argument('-nc', '--num_of_clients', type=int, default=2, help='numer of the clients')
 parser.add_argument('-cf', '--cfraction', type=float, default=1.0, help='C fraction, 0 means 1 client, 1 means total clients')
 parser.add_argument('-E', '--epoch', type=int, default=5, help='local train epoch')
 parser.add_argument('-B', '--batchsize', type=int, default=200, help='local train batch size')
@@ -33,6 +33,8 @@ parser.add_argument('-sp', '--save_path', type=str, default='./checkpoints', hel
 parser.add_argument('-iid', '--IID', type=int, default=0, help='the way to allocate data to clients')
 parser.add_argument('-of', '--obeserve_file', type=str, default='test_run', help='file for obeservations')
 parser.add_argument('-mig', '--migration', type=int, default=1, help='enable migration')
+parser.add_argument('-fid', '--fog_id', type='str', default='fog0', help='fog device id')
+
 
 def test_mkdir(path):
     if not os.path.isdir(path):
@@ -111,9 +113,14 @@ if __name__=='__main__':
 
 
         # have client configs here
+        my_id = int(args.fog_id[3:])
         myClients = {}
+        base_id = args.num_of_clients*my_id
         for i in range(args.num_of_clients):
-            myClients[f'client{i}'] = f'127.0.0.1:400{i}'
+            myClients[f'client{base_id + i}'] = f'127.0.0.1:400{base_id + i}'
+
+        # have cloud config here
+        cloud_address = '127.0.0.1:5000'
         
         #@measure_energy(domains=[RaplCoreDomain(0)], handler=energy_csv)
         
