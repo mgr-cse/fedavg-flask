@@ -29,7 +29,7 @@ parser.add_argument('-lr', "--learning_rate", type=float, default=0.01, help="le
                     use value from origin paper as default")
 parser.add_argument('-vf', "--val_freq", type=int, default=1, help="model validation frequency(of communications)")
 parser.add_argument('-sf', '--save_freq', type=int, default=20, help='global model save frequency(of communication)')
-parser.add_argument('-ncomm', '--num_comm', type=int, default=2, help='number of communications')
+parser.add_argument('-ncomm', '--num_comm', type=int, default=5, help='number of communications')
 parser.add_argument('-sp', '--save_path', type=str, default='./checkpoints', help='the saving path of checkpoints')
 parser.add_argument('-iid', '--IID', type=int, default=0, help='the way to allocate data to clients')
 parser.add_argument('-of', '--obeserve_file', type=str, default='test_run', help='file for obeservations')

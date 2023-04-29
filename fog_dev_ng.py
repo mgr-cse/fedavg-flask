@@ -18,6 +18,9 @@ from traceback import print_exc
 import codecs
 import asyncio
 from flask import Flask, request
+import time
+from copy import deepcopy
+import threading
 
 parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter, description="FedAvg")
 parser.add_argument('-g', '--gpu', type=str, default='0,1,2,3,4,5,6,7', help='gpu id to use(e.g. 0,1,2,3)')
@@ -36,10 +39,14 @@ parser.add_argument('-iid', '--IID', type=int, default=0, help='the way to alloc
 parser.add_argument('-of', '--obeserve_file', type=str, default='test_run', help='file for obeservations')
 parser.add_argument('-mig', '--migration', type=int, default=1, help='enable migration')
 parser.add_argument('-fid', '--fog_id', type=str, default='fog0', help='fog device id')
+parser.add_argument('-nfog', '--num_fog', type=int, default=4, help='number of fog devices')
 parser.add_argument('-p', '--port', type=int, default=5000, help='port of client process')
+parser.add_argument('-srf', '--server_fraction', type=float, default=1.0, help='fraction of other servers selected')
 
-
+import logging
 app = Flask(__name__)
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
 
 
 def test_mkdir(path):
@@ -79,20 +86,84 @@ async def train_clients(clients_in_comm, global_vars):
     return global_vars_new
 
     
-@app.route('/train', methods=['POST'])
-def train_endpoint():
+@app.route('/get_vars', methods=['POST'])
+def get_vars():
     try:
-        receive = request.json
-        global_vars = receive['params']
-        global_vars = pickle.loads(codecs.decode(global_vars.encode(), "base64"))
+        params = codecs.encode(pickle.dumps(global_vars), "base64").decode()
+        return {
+            "status": "success",
+            "params": params
+        }
     except:
+        print('++++var request exception occured')
         print_exc()
 
+@app.route('/')
+def index():
+    return 'Web App with Python Flask!'
+
+@app.route('/get_f1', methods=['POST'])
+def get_f1():
+    for variable, value in zip(tf.trainable_variables(), global_vars):
+        variable.load(value, sess)
+    acc, cross, y_pred_run, y_true_run = sess.run([accuracy, Cross_entropy, y_pred, y_true], feed_dict={inputsx: test_data, inputsy: test_label})
+    my_score = f1_score(y_true_run, y_pred_run, average=None)
+    my_score = my_score.tolist()
+    return {
+        "status": "success",
+        "score": my_score
+    }
+
+def get_latency(address: str):
+    try:
+        curr_time = time.time()
+        res = requests.get(f'http://{address}/')
+        if res.ok:
+            lat = time.time() - curr_time
+            return lat
+        return 1000.0
+    except:
+        # return a large value
+        return 1000.0
+
+def request_f1(address: str):
+    try:
+        res = requests.post(f'http://{address}/get_f1', json={})
+        response = res.json()
+        score = response['score']
+        return score
+    except:
+        # return a large value
+        print('f1 except')
+        return 'except'
+
+def request_vars(address: str):
+    try:
+        res = requests.post(f'http://{address}/get_vars', json={})
+        response = res.json()
+        other_vars = response['params']
+        return_vars = pickle.loads(codecs.decode(other_vars.encode(), "base64"))
+        return return_vars
+    except:
+        # return a large value
+        print('vars except')
+        print_exc()
+        return deepcopy(global_vars)
+
+def getsim(v1, v2):
+    return np.dot(v1, v2)/(np.linalg.norm(v1)*np.linalg.norm(v2))
+
+def train_func():
+    print('waiting for endpoints to go up')
+    time.sleep(10)
+    global global_vars
     all_vars = tf.trainable_variables()
     for variable, value in zip(all_vars, global_vars):
         variable.load(value, sess)
     
-    for i in tqdm(range(args.val_freq)):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    for i in tqdm(range(args.num_comm)):
         #print("communicate round {}".format(i))
         order = np.arange(args.num_of_clients)
         np.random.shuffle(order)
@@ -102,6 +173,48 @@ def train_endpoint():
         loop = asyncio.get_event_loop()
         global_vars = loop.run_until_complete(train_clients(clients_in_comm, global_vars))
 
+        if i % args.val_freq == 0 and i != 0:
+            # mixing
+            for variable, value in zip(tf.trainable_variables(), global_vars):
+                variable.load(value, sess)
+            acc, cross, y_pred_run, y_true_run = sess.run([accuracy, Cross_entropy, y_pred, y_true], feed_dict={inputsx: test_data, inputsy: test_label})
+            my_score = f1_score(y_true_run, y_pred_run, average=None)
+            print('accuracy:', acc)
+            
+            
+            lats = []
+            for fog in myFogdevs:
+                lat = get_latency(myFogdevs[fog])
+                print(f'latency_val: {lat}')
+                if lat < lat_thresh:
+                    lats.append(fog)
+            f1_scores = {}
+            for fog in lats:
+                other_score = request_f1(myFogdevs[fog])
+                if other_score == 'except':
+                    other_score = my_score
+                other_score = np.array(other_score)
+                similarity = getsim(my_score, other_score)
+                f1_scores[fog] = similarity
+            
+            sorted_tup = sorted(f1_scores.items(), key=lambda kv: (kv[1], kv[0]))
+            num_servs = int(max(args.num_fog* args.server_fraction, 1))
+            selected_servers = sorted_tup[0:num_servs]
+            selected_servers = [s for s, _ in selected_servers]
+            selected_servers = set(selected_servers)      
+            
+            serv_sum_vars = deepcopy(global_vars)
+            for fog in selected_servers:
+                local_vars = request_vars(myFogdevs[fog])
+                for sum_var, local_var in zip(serv_sum_vars, local_vars):
+                    sum_var += local_var
+            global_vars_new = []
+            for var in serv_sum_vars:
+                global_vars_new.append(var / (len(selected_servers) + 1))
+
+            # update the self model
+            global_vars = deepcopy(global_vars_new)      
+            
 
     params = codecs.encode(pickle.dumps(global_vars), "base64").decode()
     return {
@@ -179,8 +292,14 @@ if __name__=='__main__':
             myClients[f'client{base_id + i}'] = f'127.0.0.1:400{base_id + i}'
         print(myClients)
 
-        # have cloud config here
-        cloud_address = '127.0.0.1:5000'
+        # have fog config here
+        lat_thresh = 10.0
+        myFogdevs = {}
+        for i in range(args.num_fog):
+            if i == my_id:
+                continue
+            myFogdevs[f'fog{i}'] = f'127.0.0.1:500{i}'
+        print(myFogdevs)
         
         #@measure_energy(domains=[RaplCoreDomain(0)], handler=energy_csv)
 
@@ -188,5 +307,11 @@ if __name__=='__main__':
         vars = tf.trainable_variables()
         global_vars = sess.run(vars)
         num_in_comm = int(max(args.num_of_clients * args.cfraction, 1))
-        app.run(host='0.0.0.0', port=args.port, debug=False, threaded=False, processes=1)
+
+        # start training thread
+        thread1 = threading.Thread(target=train_func, args=())
+        thread1.start()
+
+        app.run(host='0.0.0.0', port=args.port, debug=False, threaded=True, processes=1)
+        thread1.join()
         
