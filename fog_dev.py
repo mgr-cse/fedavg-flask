@@ -16,6 +16,8 @@ import requests
 import pickle
 from traceback import print_exc
 import codecs
+import asyncio
+from flask import Flask, request
 
 parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter, description="FedAvg")
 parser.add_argument('-g', '--gpu', type=str, default='0,1,2,3,4,5,6,7', help='gpu id to use(e.g. 0,1,2,3)')
@@ -26,14 +28,18 @@ parser.add_argument('-B', '--batchsize', type=int, default=200, help='local trai
 parser.add_argument('-mn', '--modelname', type=str, default='mnist_2nn', help='the model to train')
 parser.add_argument('-lr', "--learning_rate", type=float, default=0.01, help="learning rate, \
                     use value from origin paper as default")
-parser.add_argument('-vf', "--val_freq", type=int, default=1, help="model validation frequency(of communications)")
+parser.add_argument('-vf', "--val_freq", type=int, default=5, help="model validation frequency(of communications)")
 parser.add_argument('-sf', '--save_freq', type=int, default=20, help='global model save frequency(of communication)')
 parser.add_argument('-ncomm', '--num_comm', type=int, default=200, help='number of communications')
 parser.add_argument('-sp', '--save_path', type=str, default='./checkpoints', help='the saving path of checkpoints')
 parser.add_argument('-iid', '--IID', type=int, default=0, help='the way to allocate data to clients')
 parser.add_argument('-of', '--obeserve_file', type=str, default='test_run', help='file for obeservations')
 parser.add_argument('-mig', '--migration', type=int, default=1, help='enable migration')
-parser.add_argument('-fid', '--fog_id', type='str', default='fog0', help='fog device id')
+parser.add_argument('-fid', '--fog_id', type=str, default='fog0', help='fog device id')
+parser.add_argument('-p', '--port', type=int, default=5000, help='port of client process')
+
+
+app = Flask(__name__)
 
 
 def test_mkdir(path):
@@ -50,7 +56,59 @@ def train_client(address: str, params):
         return local_vars
     except:
         print_exc()
-        return None
+
+
+async def train_clients(clients_in_comm, global_vars):
+    sum_vars = None
+    loop = asyncio.get_event_loop()
+    local_var_futures = []
+    for client in clients_in_comm:
+        local_var_futures.append(loop.run_in_executor(None, train_client ,myClients[client], global_vars))
+
+    for f in local_var_futures:
+        local_vars = await f    
+        if sum_vars is None:
+            sum_vars = local_vars
+        else:
+            for sum_var, local_var in zip(sum_vars, local_vars):
+               sum_var += local_var       
+    
+    global_vars_new = []
+    for var in sum_vars:
+        global_vars_new.append(var / len(clients_in_comm))
+    return global_vars_new
+
+    
+@app.route('/train', methods=['POST'])
+def train():
+    try:
+        receive = request.json
+        global_vars = receive['params']
+        global_vars = pickle.loads(codecs.decode(global_vars.encode(), "base64"))
+    except:
+        print_exc()
+
+    all_vars = tf.trainable_variables()
+    for variable, value in zip(all_vars, global_vars):
+        variable.load(value, sess)
+    
+    for i in tqdm(range(args.val_freq)):
+        #print("communicate round {}".format(i))
+        order = np.arange(args.num_of_clients)
+        np.random.shuffle(order)
+        clients_in_comm = list(myClients.keys())
+
+        # call clients in parallel async
+        loop = asyncio.get_event_loop()
+        global_vars = loop.run_until_complete(train_clients(clients_in_comm, global_vars))
+
+
+    params = codecs.encode(pickle.dumps(global_vars), "base64").decode()
+    return {
+        "status": "success",
+        "params": params
+    }
+          
 
 
 if __name__=='__main__':
@@ -101,6 +159,7 @@ if __name__=='__main__':
             log_device_placement=False, \
             allow_soft_placement=True, \
             gpu_options=tf.GPUOptions(allow_growth=True))) as sess:
+        
         sess.run(tf.initialize_all_variables())
 
         with open('client-datasets/test.data', 'rb') as f:
@@ -118,76 +177,16 @@ if __name__=='__main__':
         base_id = args.num_of_clients*my_id
         for i in range(args.num_of_clients):
             myClients[f'client{base_id + i}'] = f'127.0.0.1:400{base_id + i}'
+        print(myClients)
 
         # have cloud config here
         cloud_address = '127.0.0.1:5000'
         
         #@measure_energy(domains=[RaplCoreDomain(0)], handler=energy_csv)
-        
+
+        # app begins here
         vars = tf.trainable_variables()
         global_vars = sess.run(vars)
         num_in_comm = int(max(args.num_of_clients * args.cfraction, 1))
-        for i in tqdm(range(args.num_comm)):
-            #print("communicate round {}".format(i))
-            order = np.arange(args.num_of_clients)
-            np.random.shuffle(order)
-            clients_in_comm = ['client{}'.format(i) for i in order[0:num_in_comm]]
-
-            sum_vars = None
-            for client in clients_in_comm:
-                local_vars = train_client(myClients[client], global_vars)
-                if sum_vars is None:
-                    sum_vars = local_vars
-                else:
-                    for sum_var, local_var in zip(sum_vars, local_vars):
-                       sum_var += local_var
-            global_vars = []
-            for var in sum_vars:
-                global_vars.append(var / num_in_comm)
-
-            if i % args.val_freq == 0:
-                for variable, value in zip(vars, global_vars):
-                    variable.load(value, sess)
-                acc, cross, y_pred_run, y_true_run = sess.run([accuracy, Cross_entropy, y_pred, y_true], feed_dict={inputsx: test_data, inputsy: test_label})
-                
-                # data to note
-                print('communication round:', i)
-                print('Accuracy:', acc, 'Loss:', cross)
-                
-                print('Migration cost:', 0)
-                f1_val = f1_score(y_true_run, y_pred_run, average='macro')
-                prec_val = precision_score(y_true_run, y_pred_run, average='macro')
-                rec_val = recall_score(y_true_run, y_pred_run, average='macro')
-                print(f'f1={f1_val} precision={prec_val} recall={rec_val}')
-                
-                # save data in dictionary
-                data_note = {
-                    "round": i,
-                    "accuracy": float(acc),
-                    "loss": [float(l) for l in cross],
-                    "energy_global": 0,
-                    "energy_client": 0,
-                    "latency": 0,
-                    "f1": f1_val,
-                    "prec": prec_val,
-                    "rec": rec_val,
-                    "mig_cost": 0
-                }
-                data_to_save.append(data_note)
-
-        # save obeserved_data
-        final_data = {
-            "model": "fedavg",
-            "val_freq": args.val_freq,
-            "migration": args.migration,
-            "num_clients": myClients.num_of_clients,
-            "servers": 1,
-            "serv_frac": 1.0,
-            "client_frac": args.cfraction,
-            "data": data_to_save
-
-        }
-        with open(f'./obeserve/{args.obeserve_file}', 'w') as f:
-            json.dump(final_data, f)
-            print('+++ written to file')
-        #energy_csv.save_data()
+        app.run(host='0.0.0.0', port=args.port, debug=False, threaded=False, processes=1)
+        

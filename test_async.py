@@ -7,7 +7,7 @@ def fetch(url):
     print(f'printed {url}')
     return f'returned {url}'
 
-async def main():
+async def main(val):
     urls = [
         'https://www.example.com/page1',
         'https://www.example.com/page2',
@@ -23,8 +23,18 @@ async def main():
     for f in futures:
         ret = await f
         print(ret)
-        
+    return val
+
+def bar():
+    print(global_var)
+
+def foo():
+    global_var = 31
+    bar()
     
 if __name__ == '__main__':
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(main())
+    ret = loop.run_until_complete(main(23))
+    global_var = 42
+    foo()
+    print(ret)
