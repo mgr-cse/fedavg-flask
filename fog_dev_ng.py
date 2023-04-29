@@ -187,7 +187,7 @@ def train_func():
             my_score = f1_score(y_true_run, y_pred_run, average=None)
             print('accuracy:', acc)
             
-            '''
+            
             lats = []
             for fog in myFogdevs:
                 lat = get_latency(myFogdevs[fog])
@@ -220,7 +220,7 @@ def train_func():
 
             # update the self model
             global_vars = deepcopy(global_vars_new)      
-            '''
+            
 
     params = codecs.encode(pickle.dumps(global_vars), "base64").decode()
     return {
