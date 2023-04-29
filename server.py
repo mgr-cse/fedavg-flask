@@ -16,6 +16,7 @@ import requests
 import pickle
 from traceback import print_exc
 import codecs
+import asyncio
 
 parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter, description="FedAvg")
 parser.add_argument('-g', '--gpu', type=str, default='0,1,2,3,4,5,6,7', help='gpu id to use(e.g. 0,1,2,3)')
@@ -50,8 +51,7 @@ def train_client(address: str, params):
         print_exc()
         return None
 
-
-if __name__=='__main__':
+async def main():
     args = parser.parse_args()
 
     # GPU preparation
@@ -125,15 +125,22 @@ if __name__=='__main__':
             order = np.arange(args.num_of_clients)
             np.random.shuffle(order)
             clients_in_comm = ['client{}'.format(i) for i in order[0:num_in_comm]]
-
+            
             sum_vars = None
+            loop = asyncio.get_event_loop()
+            local_var_futures = []
             for client in clients_in_comm:
-                local_vars = train_client(myClients[client], global_vars)
+                local_var_futures.append(loop.run_in_executor(None, train_client ,myClients[client], global_vars))
+
+            for f in local_var_futures:
+                local_vars = await f    
                 if sum_vars is None:
                     sum_vars = local_vars
                 else:
                     for sum_var, local_var in zip(sum_vars, local_vars):
                        sum_var += local_var
+            
+            
             global_vars = []
             for var in sum_vars:
                 global_vars.append(var / num_in_comm)
@@ -184,3 +191,7 @@ if __name__=='__main__':
             json.dump(final_data, f)
             print('+++ written to file')
         #energy_csv.save_data()
+
+if __name__=='__main__':
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
